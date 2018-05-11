@@ -1,0 +1,9 @@
+Strategies/
+data/
+_GDAX/
+Credentials/
+*.pyc
+*.DS_Store
+*.ipynb
+algorithm.py
+Backtest.py
