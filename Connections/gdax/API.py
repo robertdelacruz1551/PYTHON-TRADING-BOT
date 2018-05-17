@@ -50,12 +50,12 @@ class API():
         }
 
         # {60, 300, 900, 3600, 21600, 86400}
-        if '1min'  in self.increments: threading.Thread(name="OHLC 1min" ,target=self.getOHLC, kwargs={'increment':'1min', 'granularity':60}).start()
-        if '5min'  in self.increments: threading.Thread(name="OHLC 5min" ,target=self.getOHLC, kwargs={'increment':'5min', 'granularity':300}).start()
-        if '15min' in self.increments: threading.Thread(name="OHLC 15min",target=self.getOHLC, kwargs={'increment':'15min','granularity':900}).start()
-        if '1hour' in self.increments: threading.Thread(name="OHLC 1hour",target=self.getOHLC, kwargs={'increment':'1hour','granularity':3600}).start()
-        if '6hour' in self.increments: threading.Thread(name="OHLC 6hour",target=self.getOHLC, kwargs={'increment':'6hour','granularity':21600}).start()
-        if '1day'  in self.increments: threading.Thread(name="OHLC 1day" ,target=self.getOHLC, kwargs={'increment':'1day', 'granularity':86400}).start()
+        if '1min'  in self.increments: threading.Thread(name="OHLC 1min" ,target=self.getOHLC, kwargs={'increment':'1min', 'granularity':60}).start(); time.sleep(1)
+        if '5min'  in self.increments: threading.Thread(name="OHLC 5min" ,target=self.getOHLC, kwargs={'increment':'5min', 'granularity':300}).start(); time.sleep(1)
+        if '15min' in self.increments: threading.Thread(name="OHLC 15min",target=self.getOHLC, kwargs={'increment':'15min','granularity':900}).start(); time.sleep(1)
+        if '1hour' in self.increments: threading.Thread(name="OHLC 1hour",target=self.getOHLC, kwargs={'increment':'1hour','granularity':3600}).start(); time.sleep(1)
+        if '6hour' in self.increments: threading.Thread(name="OHLC 6hour",target=self.getOHLC, kwargs={'increment':'6hour','granularity':21600}).start(); time.sleep(1)
+        if '1day'  in self.increments: threading.Thread(name="OHLC 1day" ,target=self.getOHLC, kwargs={'increment':'1day', 'granularity':86400}).start(); time.sleep(1)
     
 
     def getOHLC(self, increment, granularity):
@@ -104,14 +104,16 @@ class API():
                     break
 
                 # [ time, low, high, open, close, volume ]
-                candle = self.OHLC[increment][0]
-                candle[1] = np.min([ candle[1], ticker['price'] ]) # low
-                candle[2] = np.max([ candle[2], ticker['price'] ]) # high
+                candle = np.asarray(self.OHLC[increment][0], dtype=np.float)
+                candle[1] = np.nanmin([ candle[1], ticker['price'] ]) # low
+                candle[2] = np.nanmax([ candle[2], ticker['price'] ]) # high
                 candle[4] = ticker['price'] # close
-                self.OHLC[increment][0] = candle
+                if candle[3] == np.nan:
+                   candle[3] = ticker['price'] # open
+                self.OHLC[increment][0] = candle.tolist()   
                 self.lastPrice = ticker['price']
             except Exception as e:
-                print("price: {}, {} ohlc: {}".format(ticker['price'], self.increments, candle))
+                print("price: {}, {} ohlc: {}".format(ticker['price'], increment, candle))
                 raise Exception(e)
                 
         ohlc = self.OHLC
@@ -145,7 +147,9 @@ class API():
         
         elif type == "limit":
             payload = { "product_id": self.symbol, "size": size, "price": price, "type": "limit", "stp": "co", "post_only": True }
-        
+        elif type == "market":
+            payload = { "product_id": self.symbol, "size": size, "type": "market" }
+
         if side == "buy":
             return self.private.buy(**payload) 
         else:
