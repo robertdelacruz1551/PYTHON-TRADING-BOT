@@ -8,9 +8,10 @@ import threading
 import json
 
 class Clerk():
-    def __init__(self, api, strategy = None, strategies=[], daysRunning=1, archive=False):
+    def __init__(self, api, strategy = None, strategies=[], daysRunning=1, archive=False, governByCandle='6hour'):
         if strategy:
             strategies.append(strategy)
+        self.governByCandle = governByCandle
         self.strategies = strategies
         self.api        = api
         self.daysRunning= daysRunning
@@ -52,9 +53,15 @@ class Clerk():
         data = self.api.data()
         # if we have data then run the strategy
         if data:
+            # # if the current trend is down then don't trade
+            # # [ time, low, high, open, close, volume ]
+            # if data['ohlc'][self.governByCandle] and data['ohlc'][self.governByCandle][0][3] < data['ohlc'][self.governByCandle][0][4]:
+            #     time.sleep(5)
+            # else:
+            
             # Run the strategies
             for strategy in self.strategies:
-                if len(data['ohlc'][strategy.increment]) == 0:
+                if len(data['ohlc'][strategy.increment]) == 0:# TODO:: this needs to move to the strategy. The clerk should not manage data governance
                     print(data['ohlc'][strategy.increment])
                     print("{}, is wating for {} ohlc data".format(strategy.name, strategy.increment))
                     break
@@ -77,11 +84,8 @@ class Clerk():
                                 message = orderPlaced['reject_reason']
                             else:
                                 message = 'rejected'
-                            print("{}: Strategy: {}, message: {}, [ type: {}, side: {} price: {}, size: {} ]".format(datetime.datetime.now(), strategy.name, message, order['type'], order['side'], order['price'], order['size']))
+                            print("{}: Strategy: {}, message: {}, order: [ type: {}, side: {} price: {}, size: {} ]".format(datetime.datetime.now(), strategy.name, message, order['type'], order['side'], order['price'], order['size']))
 
-                    # store the instructions received
-                    if self.saveArchive:
-                        self.archive.append(instructions)
         else:
             print("{}: Waiting for data".format(datetime.datetime.now()))
             time.sleep(5)
