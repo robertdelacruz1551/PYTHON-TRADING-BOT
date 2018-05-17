@@ -36,6 +36,7 @@ class AccountManager():
     def size(self, buy):
         return round((self.funds / buy),8)
 
+
     def balance(self, orders):
         self.orders = orders[ ( ( orders['order_id'].isin(self.bookedOrdersByAlgo) ) | 
                                 ( orders['maker_order_id'].isin(self.bookedOrdersByAlgo) ) | 
