@@ -19,11 +19,11 @@ from websocket import create_connection, WebSocketConnectionClosedException
 from pymongo import MongoClient 
 from Connections.gdax.gdax_auth import get_auth_headers
 from signal import signal, SIGPIPE, SIG_DFL
-signal(SIGPIPE,SIG_DFL) # this ignores the errno 32, broken pipe
 
 class WebsocketClient(object):
     def __init__(self, url="wss://ws-feed.gdax.com", products=None, message_type="subscribe", channels=None, should_print=False, auth=False, key=None, 
             b64secret=None, passphrase=None, mongo_collection=None, persist=False):
+        signal(SIGPIPE,SIG_DFL) # this ignores the errno 32, broken pipe
         self.url = url
         self.products = products
         self.channels = channels
@@ -50,7 +50,7 @@ class WebsocketClient(object):
             self._listen()
             self._disconnect()
             if not self.stop:
-                print("Attempting to reconnect websocket {}".format(self.channels))
+                print('Restating {} websocket connection'.format(', '.join(self.channels)))
                 _go()
 
         self.stop = False
@@ -111,45 +111,59 @@ class WebsocketClient(object):
                 if self.ws and (current_time - last_update_time) >= interval:
                     self.ws.ping("keepalive")
                     last_update_time = current_time
+            except IOError as e:
+                if e.errno == errno.EPIPE:
+                    continue
+                else:
+                    raise Exception(e)
             except Exception as e:
                 print("{}: Error encountered while pinging the server: {}".format(datetime.datetime.now(), e))
                 raise Exception(e)
 
-
     def _listen(self):
         keepalive = Thread(target=self.keepalive)
         keepalive.start()
-        while not self.stop:
+        while not self.stop and self.ws:
             try:
                 data = self.ws.recv()
                 msg = json.loads(data)
-            except (WebSocketConnectionClosedException, ValueError, Exception) as e:
-                if not self.stop:
-                   self.on_error(e)
+            except IOError as e:
+                if e.errno == errno.EPIPE:
+                    continue
+                else:
+                    self.on_error(e, data)
+                    break
+            except WebSocketConnectionClosedException as e:
+                self.on_error(e)
+                break
+            except (ValueError, Exception) as e:
+                self.on_error(e, data)
                 break
             else:
                 self.on_message(msg)
-        keepalive.join()
-
+        # keepalive.join()
 
     def _disconnect(self):
         try:
-            if self.ws:
-                if self.type == "heartbeat":
-                    self.ws.send(json.dumps({"type": "heartbeat", "on": False}))
-                self.close()
+            self.terminatingWs()
         except Exception as e:
             print("Error while disconnecting:\n     {}".format(e))
             pass
         else:
             self.on_close()
 
+    def terminatingWs(self):
+        if self.ws:
+            if self.type == "heartbeat":
+                self.ws.send(json.dumps({"type": "heartbeat", "on": False}))
+            self.ws.abort()
+            self.ws = None
+
     def close(self):
         try:
             print("Closing websocket connection for channel(s) {}".format(', '.join(self.channels)))
             self.stop = True
-            self.ws.abort()
-            self.ws = None
+            self.terminatingWs()
             self.thread.join()
         except Exception as e:
             print("Error occured while attempting to close the connection: \n     {}".format(e))
