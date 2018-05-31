@@ -6,4 +6,5 @@ Credentials/
 *.DS_Store
 *.ipynb
 algorithm.py
+Services/Statements.py
 Backtest.py
