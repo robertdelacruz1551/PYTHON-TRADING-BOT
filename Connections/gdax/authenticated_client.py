@@ -164,7 +164,7 @@ class AuthenticatedClient(PublicClient):
         if limit:
             url += "limit={}&".format(str(limit))
         r = requests.get(url, auth=self.auth, timeout=self.timeout)
-        # r.raise_for_status()
+        r.raise_for_status()
         result.append(r.json())
         if 'cb-after' in r.headers and limit is not len(r.json()):
             return self.paginate_fills(result, r.headers['cb-after'], order_id=order_id, product_id=product_id)
@@ -177,7 +177,7 @@ class AuthenticatedClient(PublicClient):
         if product_id:
             url += "product_id={}&".format(product_id)
         r = requests.get(url, auth=self.auth, timeout=self.timeout)
-        # r.raise_for_status()
+        r.raise_for_status()
         if r.json():
             result.append(r.json())
         if 'cb-after' in r.headers:
