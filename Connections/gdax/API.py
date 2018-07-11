@@ -23,17 +23,17 @@ class API():
                                 'user_id','shares']
 
         if environment == "production":
-            self.ws_url="wss://ws-feed.gdax.com"
-            self.api_url="https://api.gdax.com"
+            self.ws_url="wss://ws-feed.pro.coinbase.com"
+            self.api_url="https://api.pro.coinbase.com"
         else:
-            self.ws_url="wss://ws-feed-public.sandbox.gdax.com"
-            self.api_url="https://api-public.sandbox.gdax.com"
+            self.ws_url="wss://ws-feed-public.sandbox.pro.coinbase.com"
+            self.api_url="https://api-public.sandbox.pro.coinbase.com"
 
         self.recorded       = []
         self.kill           = False
         self.public         = GDAX.PublicClient()
         self.private        = GDAX.AuthenticatedClient(url=self.api_url, key=self.key, b64secret=self.b64secret, passphrase=self.passphrase )
-        self.tickerWS       = GDAX.WebsocketClient(    url="wss://ws-feed.gdax.com",  key=self.key, b64secret=self.b64secret, passphrase=self.passphrase, products=self.symbol, message_type="subscribe", channels="ticker", should_print=False, auth=False, persist=False)
+        self.tickerWS       = GDAX.WebsocketClient(    url="wss://ws-feed.pro.coinbase.com",  key=self.key, b64secret=self.b64secret, passphrase=self.passphrase, products=self.symbol, message_type="subscribe", channels="ticker", should_print=False, auth=False, persist=False)
         self.ordersPlacedWS = GDAX.WebsocketClient(    url=self.ws_url,  key=self.key, b64secret=self.b64secret, passphrase=self.passphrase, products=self.symbol, message_type="subscribe", channels="user",   should_print=False, auth=True, persist=True)
         self.tickerWS.start()
         self.ordersPlacedWS.start()
@@ -48,7 +48,12 @@ class API():
             '6hour': [],
             '1day': []
         }
+        self.order_book = {
+            'bids': [],
+            'asks': []
+        }
 
+        print(self.increments)
         # {60, 300, 900, 3600, 21600, 86400}
         if '1min'  in self.increments: threading.Thread(name="OHLC 1min" ,target=self.getOHLC, kwargs={'increment':'1min', 'granularity':60}).start(); time.sleep(1)
         if '5min'  in self.increments: threading.Thread(name="OHLC 5min" ,target=self.getOHLC, kwargs={'increment':'5min', 'granularity':300}).start(); time.sleep(1)
@@ -56,6 +61,8 @@ class API():
         if '1hour' in self.increments: threading.Thread(name="OHLC 1hour",target=self.getOHLC, kwargs={'increment':'1hour','granularity':3600}).start(); time.sleep(1)
         if '6hour' in self.increments: threading.Thread(name="OHLC 6hour",target=self.getOHLC, kwargs={'increment':'6hour','granularity':21600}).start(); time.sleep(1)
         if '1day'  in self.increments: threading.Thread(name="OHLC 1day" ,target=self.getOHLC, kwargs={'increment':'1day', 'granularity':86400}).start(); time.sleep(1)
+    
+        threading.Thread(name="Order book" ,target=self.getOrderBook ).start()
     
 
     def getOHLC(self, increment, granularity):
@@ -78,19 +85,38 @@ class API():
                             interval -= 1
                             time.sleep(1)
             except Exception as e:
-                print("{}: Error reported in {} OHLC: {}".format(datetime.datetime.now(), increment, e))
-                time.sleep(1)
+                self.on_error('{} ohlc'.format(increment), e)
                 continue
         print("OHLC {} thread stopped".format(increment))
 
 
+    def getOrderBook(self):
+        print("initializing order book")
+        while not self.kill:
+            try:
+                order_book = self.public.get_product_order_book(product_id=self.symbol, level=2)
+                self.order_book['bids'] = pd.DataFrame(data=order_book['bids'], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric)
+                self.order_book['asks'] = pd.DataFrame(data=order_book['asks'], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric)
+                time.sleep(1)
+            except Exception as e:
+                self.on_error('getOrderBook', e)
+                continue
+        print("Orderbook thread stopped")
+
+    def on_error(self, origin, msg):
+        print("{}: Error reported in {}: {}".format(datetime.datetime.now(), origin, msg))
+        time.sleep(1)
 
     def getTicker(self):
         if self.tickerWS.data and self.tickerWS.data['type'] == 'ticker':
             return {
                 "price": float(self.tickerWS.data['price']),
                 "bid":   float(self.tickerWS.data['best_bid']),
-                "ask":   float(self.tickerWS.data['best_ask'])
+                "ask":   float(self.tickerWS.data['best_ask']),
+                "24h_open":  float(self.tickerWS.data['open_24h']),
+                "24h_high":  float(self.tickerWS.data['high_24h']),
+                "24h_low":   float(self.tickerWS.data['low_24h']),
+                "24h_percentage": (1 - (float(self.tickerWS.data['open_24h']) / float(self.tickerWS.data['price']))) * 100
             }
         else:
             return None
@@ -118,9 +144,10 @@ class API():
                 
         ohlc = self.OHLC
         orders_placed = self.getOrders()
-
+        order_book = self.order_book
         return {
             "ticker": ticker,
+            "order_book": order_book,
             "orders_placed": orders_placed,
             "ohlc": ohlc
         }
@@ -193,7 +220,7 @@ class API():
                 orders_placed.loc[orders_placed['order_id'] == order['order_id'], 'remaining_size'] = order['remaining_size']
             elif order['type'] == 'match':
                 # buys
-                orders_placed.loc[(orders_placed['side'] == "buy" )&((orders_placed['order_id'] == order['maker_order_id'])|(orders_placed['order_id'] == order['taker_order_id'])), 'funds']          -= (order['price'] * order['size']) - (order['price'] * order['size'] * order['taker_fee_rate'])
+                orders_placed.loc[(orders_placed['side'] == "buy" )&((orders_placed['order_id'] == order['maker_order_id'])|(orders_placed['order_id'] == order['taker_order_id'])), 'funds']          -= (order['price'] * order['size']) + (order['price'] * order['size'] * order['taker_fee_rate'])
                 orders_placed.loc[(orders_placed['side'] == "buy" )&((orders_placed['order_id'] == order['maker_order_id'])|(orders_placed['order_id'] == order['taker_order_id'])), 'shares']         += order['size']
                 orders_placed.loc[(orders_placed['side'] == "buy" )&((orders_placed['order_id'] == order['maker_order_id'])|(orders_placed['order_id'] == order['taker_order_id'])), 'remaining_size'] =  order['remaining_size']
                 # sells
