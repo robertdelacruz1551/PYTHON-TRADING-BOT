@@ -4,33 +4,45 @@ from stockstats import StockDataFrame
 pd.options.mode.chained_assignment = None
 
 class TechnicalAnalyzer():
-    def __init__(self, config):
-        self.candles    = None
-        self.candle     = None
-        self.order_book = None
-        self.ticker     = None
-        self.config     = config
+    def __init__(self, indicators, increments):
+        """https://pypi.org/project/stockstats/"""
+        self.increments = increments
+        self.indicators = indicators
+        self.data = {
+            "ticker": None,
+            "order_book": {
+                'bids': pd.DataFrame([], columns=['price','size','orders']),
+                'asks': pd.DataFrame([], columns=['price','size','orders'])
+            },
+            "orders_placed": [],
+            "ohlc": []
+        }
 
-    def OHLC(self, data):
-        self.candles = pd.DataFrame(data=data, columns=(['time', 'low', 'high', 'open', 'close', 'volume'])).iloc[::-1]
-        stock = StockDataFrame.retype(self.candles)
-        if 'rsi_period' in self.config:
-            self.candles['rsi'] = stock['rsi_{}'.format(self.config['rsi_period'])]
-        if 'cci_period' in self.config:
-            self.candles['cci'] = stock['cci_{}'.format(self.config['cci_period'])]
-        if 'rolling_period' in self.config:
-            self.candles['middle_band'] = self.candles['close'].rolling(self.config['rolling_period']).mean()
-            self.candles['upper_band']  = self.candles['middle_band'] + self.candles['close'].rolling(self.config['rolling_period']).std() * self.config['upper_band_deviations']
-            self.candles['lower_band']  = self.candles['middle_band'] - self.candles['close'].rolling(self.config['rolling_period']).std() * self.config['lower_band_deviations']
+    def ohlcAnalysis(self):
+        for increment in self.increments:
+            try:
+                ohlc = StockDataFrame.retype( self.data['ohlc'][increment] )
+                for indicator in self.indicators:
+                    ohlc[indicator]
+                self.data['ohlc'][increment] = ohlc.iloc[-1].to_dict()
+            except Exception:
+                print('Error while analyzing OHLC in TA')
+                continue
 
-        self.candle = self.candles.iloc[-1].to_dict()
-
+    def orderBookAnalysis(self):
+        for side in ['bids', 'asks']:
+            try:
+                self.data['order_book'][side]['wall'] = self.data['order_book'][side]['size'] > self.data['order_book'][side][self.data['order_book'][side]['size'] > self.data['order_book'][side]['size'].mean()]['size'].mean()
+                self.data['order_book'][side]['strength'] = (
+                    self.data['order_book'][side].iloc[:self.data['order_book'][side][self.data['order_book'][side]['wall']].index.min()+1]['size'].rank(method='dense') + 
+                    self.data['order_book'][side].iloc[:self.data['order_book'][side][self.data['order_book'][side]['wall']].index.min()+1]['price'].rank(method='dense',ascending = self.data['order_book'][side].iloc[0]['price'] > self.data['order_book'][side].iloc[1]['price'])
+                ).rank()
+            except Exception:
+                print('Error while analyzing the Order book in TA')
+                continue
 
     def analyze(self, data=None):
-        if 'ohlc' in data and data['ohlc']:
-            self.OHLC(data['ohlc'])
-        if 'ticker' in data and data['ticker']:
-            self.ticker = data['ticker']
-        if 'order_book' in data and data['order_book']:
-            self.order_book   = data['order_book']
+        self.data = data
 
+        self.ohlcAnalysis()
+        self.orderBookAnalysis()
