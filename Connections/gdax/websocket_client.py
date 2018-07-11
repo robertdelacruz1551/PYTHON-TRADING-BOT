@@ -15,6 +15,7 @@ import socket
 import errno
 import datetime
 from threading import Thread
+import websocket
 from websocket import create_connection, WebSocketConnectionClosedException
 from pymongo import MongoClient 
 from Connections.gdax.gdax_auth import get_auth_headers
@@ -39,6 +40,10 @@ class WebsocketClient(object):
         self.should_print = should_print
         self.mongo_collection = mongo_collection
         self.persist = persist
+        self.sub_params = None
+        self.previouslyConnected = False
+        self.msgPrintDueToError = False
+        self.msgCount = 0
         if self.persist:
             self.data = []
         else:
@@ -49,17 +54,16 @@ class WebsocketClient(object):
             self._connect()
             self._listen()
             self._disconnect()
-            if not self.stop:
-                print('Restating {} websocket connection'.format(', '.join(self.channels)))
-                _go()
 
-        self.stop = False
-        self.on_open()
         self.thread = Thread(target=_go)
         self.thread.start()
     
 
-    def _connect(self):
+    def _setup(self):    
+        if self.stop:
+            print("Websocket stopped")
+            return
+
         if self.products is None:
             self.products = ["BTC-USD"]
         elif not isinstance(self.products, list):
@@ -72,9 +76,9 @@ class WebsocketClient(object):
             self.url = self.url[:-1]
 
         if self.channels is None:
-            sub_params = {'type': 'subscribe', 'product_ids': self.products}
+            self.sub_params = {'type': 'subscribe', 'product_ids': self.products}
         else:
-            sub_params = {'type': 'subscribe', 'product_ids': self.products, 'channels': self.channels}
+            self.sub_params = {'type': 'subscribe', 'product_ids': self.products, 'channels': self.channels}
 
         if self.auth:
             timestamp = str(time.time())
@@ -83,34 +87,47 @@ class WebsocketClient(object):
             hmac_key = base64.b64decode(self.api_secret)
             signature = hmac.new(hmac_key, message, hashlib.sha256)
             signature_b64 = base64.b64encode(signature.digest()).decode('utf-8').rstrip('\n')
-            sub_params['signature'] = signature_b64
-            sub_params['key'] = self.api_key
-            sub_params['passphrase'] = self.api_passphrase
-            sub_params['timestamp'] = timestamp
-        
-        if self.stop:
-            return
+            self.sub_params['signature'] = signature_b64
+            self.sub_params['key'] = self.api_key
+            self.sub_params['passphrase'] = self.api_passphrase
+            self.sub_params['timestamp'] = timestamp
 
+    def _connect(self):
         try:
+            if self.previouslyConnected:
+                print("{}: Restarting connection to channel(s) {}".format(datetime.datetime.now(), ', '.join(self.channels)))
+
+            self._setup()
+
             self.ws = create_connection(self.url)
-            self.ws.send(json.dumps(sub_params))
+            self.ws.send(json.dumps(self.sub_params))
+            self.on_open()
         except Exception:
-            print("Failed to connect.. Trying again in 10 seconds...")
+            print("{}: Failed to connect to channels {}... Trying again in 10 seconds...".format(datetime.datetime.now(), ', '.join(self.channels)))
             time.sleep(10)
             self._connect()
         else:
-            print("Connected")
-        
+            if self.previouslyConnected:
+                print("{}: Connected to channel(s) {}".format(datetime.datetime.now(), ', '.join(self.channels)))
+            self.previouslyConnected = True
 
-    def keepalive(self, interval=25):
+
+    def keepalive(self, interval=30):
         last_update_time = time.time()
-        while not self.stop and self.ws:
+        while not self.stop:
             try:
                 time.sleep(1)
                 current_time = time.time()
                 if self.ws and (current_time - last_update_time) >= interval:
                     self.ws.ping("keepalive")
                     last_update_time = current_time
+            except WebSocketConnectionClosedException as e:
+                if self.stop:
+                    break
+                else:
+                    self.on_error(e)
+                    self._connect()
+                    continue
             except IOError as e:
                 if e.errno == errno.EPIPE:
                     continue
@@ -120,28 +137,43 @@ class WebsocketClient(object):
                 print("{}: Error encountered while pinging the server: {}".format(datetime.datetime.now(), e))
                 raise Exception(e)
 
+
     def _listen(self):
         keepalive = Thread(target=self.keepalive)
         keepalive.start()
-        while not self.stop and self.ws:
+        while not self.stop:
             try:
                 data = self.ws.recv()
-                msg = json.loads(data)
+                if data:
+                    msg = json.loads(data)
             except IOError as e:
+                print("Error at IO")
                 if e.errno == errno.EPIPE:
+                    self._connect()
                     continue
                 else:
                     self.on_error(e, data)
                     break
             except WebSocketConnectionClosedException as e:
-                self.on_error(e)
+                if self.stop:
+                    break
+                else:
+                    self.on_error(e)
+                    self._connect()
+                    if 'ticker' not in self.channels:
+                        self.msgPrintDueToError = True
+                    continue
+            except ValueError as e:
+                print("Error at ValueError")
+                self.on_error(e, data)
                 break
-            except (ValueError, Exception) as e:
+            except Exception as e:
+                print("Error at other")
                 self.on_error(e, data)
                 break
             else:
                 self.on_message(msg)
-        # keepalive.join()
+        keepalive.join()
 
     def _disconnect(self):
         try:
@@ -161,7 +193,7 @@ class WebsocketClient(object):
 
     def close(self):
         try:
-            print("Closing websocket connection for channel(s) {}".format(', '.join(self.channels)))
+            print("Closing websocket connection to channel(s) {}".format(', '.join(self.channels)))
             self.stop = True
             self.terminatingWs()
             self.thread.join()
@@ -182,14 +214,20 @@ class WebsocketClient(object):
                 self.data.append(msg)
             else:
                 self.data = msg
-        if self.should_print:
+        if self.should_print or self.msgPrintDueToError:
+            if self.msgPrintDueToError:
+                self.msgCount += 1
+            if self.msgCount > 5:
+                self.msgPrintDueToError = False
+                self.msgCount = 0
             print(msg)
         if self.mongo_collection:  # dump JSON to given mongo collection
             self.mongo_collection.insert_one(self.data)
 
     def on_error(self, e, data=None):
-        self.error = e
-        print('{}: {} - data: {}'.format(datetime.datetime.now(), e, data))
+        if not self.stop:
+            self.error = e
+            print('{}: Channel(s) {}: {} - data: {}'.format(datetime.datetime.now(), ', '.join(self.channels), e, data))
         
 
 if __name__ == "__main__":
