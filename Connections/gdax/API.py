@@ -5,14 +5,24 @@ import math
 import datetime
 import time
 import threading
+import sys
+sys.path.insert(0, '/Users/Rob/Documents/Python Projects')
+from CoinbaseProWebsocketClient.CoinbaseProWebsocketClient import CoinbaseWebsocket
 
 class API():
     def __init__(self, passphrase, key, b64secret, symbol, increments=[], environment="development" ):
+        print(sys.path)
         self.passphrase  = passphrase
         self.key         = key
         self.b64secret   = b64secret
-        self.symbol      = symbol
+        self.symbol      = symbol.upper()
         self.ohlcTimeSync= False
+
+        if 'USD' in self.symbol:
+            self.precision = 2
+        else:
+            self.precision = 5
+        
 
         self.myordersColumns = ['client_oid', 'funds', 'limit_price', 'maker_order_id',
                                 'maker_profile_id', 'maker_user_id', 'new_funds', 'old_funds',
@@ -31,8 +41,19 @@ class API():
 
         self.recorded       = []
         self.kill           = False
-        self.public         = GDAX.PublicClient()
+        self.public         = GDAX.PublicClient(api_url=self.api_url)
         self.private        = GDAX.AuthenticatedClient(url=self.api_url, key=self.key, b64secret=self.b64secret, passphrase=self.passphrase )
+        
+        self.ws             = CoinbaseWebsocket( 
+                                products=[symbol],
+                                channels=['user','ticker','level2'],
+                                production=True,
+                                credentials={
+                                    'passphrase':  self.passphrase,
+                                    'key': self.key,
+                                    'b64secret': self.b64secret
+                                })
+        
         self.tickerWS       = GDAX.WebsocketClient(    url="wss://ws-feed.pro.coinbase.com",  key=self.key, b64secret=self.b64secret, passphrase=self.passphrase, products=self.symbol, message_type="subscribe", channels="ticker", should_print=False, auth=False, persist=False)
         self.ordersPlacedWS = GDAX.WebsocketClient(    url=self.ws_url,  key=self.key, b64secret=self.b64secret, passphrase=self.passphrase, products=self.symbol, message_type="subscribe", channels="user",   should_print=False, auth=True, persist=True)
         self.tickerWS.start()
@@ -49,8 +70,8 @@ class API():
             '1day': []
         }
         self.order_book = {
-            'bids': [],
-            'asks': []
+            'bids': pd.DataFrame(data=[], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric),
+            'asks': pd.DataFrame(data=[], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric)
         }
 
         print(self.increments)
@@ -72,7 +93,7 @@ class API():
             try:
                 OHLC = self.public.get_product_historic_rates(product_id=self.symbol, granularity=granularity)
                 if OHLC:
-                    self.OHLC[increment] = OHLC
+                    self.OHLC[increment] = pd.DataFrame(data=OHLC, columns=(['time', 'low', 'high', 'open', 'close', 'volume'])).iloc[::-1]
                     self.lastPrice = 0
                     if ohlcTime and ohlcTime == OHLC[0][0]:
                         time.sleep(5)
@@ -97,7 +118,7 @@ class API():
                 order_book = self.public.get_product_order_book(product_id=self.symbol, level=2)
                 self.order_book['bids'] = pd.DataFrame(data=order_book['bids'], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric)
                 self.order_book['asks'] = pd.DataFrame(data=order_book['asks'], columns=['price','size','orders'])[['size','price','orders']].apply(pd.to_numeric)
-                time.sleep(1)
+                time.sleep(1.1)
             except Exception as e:
                 self.on_error('getOrderBook', e)
                 continue
@@ -110,6 +131,8 @@ class API():
     def getTicker(self):
         if self.tickerWS.data and self.tickerWS.data['type'] == 'ticker':
             return {
+                # "time": self.tickerWS.data['time'] or time.time(),
+                "product_id": self.tickerWS.data['product_id'],
                 "price": float(self.tickerWS.data['price']),
                 "bid":   float(self.tickerWS.data['best_bid']),
                 "ask":   float(self.tickerWS.data['best_ask']),
@@ -130,18 +153,20 @@ class API():
                     break
 
                 # [ time, low, high, open, close, volume ]
-                candle = np.asarray(self.OHLC[increment][0], dtype=np.float)
-                candle[1] = np.nanmin([ candle[1], ticker['price'] ]) # low
-                candle[2] = np.nanmax([ candle[2], ticker['price'] ]) # high
-                candle[4] = ticker['price'] # close
-                if candle[3] == np.nan:
-                   candle[3] = ticker['price'] # open
-                self.OHLC[increment][0] = candle.tolist()   
-                self.lastPrice = ticker['price']
+                self.OHLC[increment][['low', 'high', 'open', 'close']].fillna(ticker['price'])
+                self.OHLC[increment][['volume']].fillna(0)
+                self.OHLC[increment].loc[-1, 'low']   = np.nanmin([ self.OHLC[increment].iloc[-1]['low'], ticker['price'] ])
+                self.OHLC[increment].loc[-1, 'high']  = np.nanmin([ self.OHLC[increment].iloc[-1]['high'],ticker['price'] ])
+                self.OHLC[increment].loc[-1, 'close'] = ticker['price']
+                if  pd.isnull(self.OHLC[increment].iloc[-1]['open']):
+                    self.OHLC[increment].loc[-1, 'open'] = ticker['price']
+
             except Exception as e:
-                print("price: {}, {} ohlc: {}".format(ticker['price'], increment, candle))
+                print("price: {}, {} ohlc: {}".format(ticker['price'], increment, self.OHLC[increment].index[-1].values.tolist()))
                 raise Exception(e)
                 
+        self.lastPrice = ticker['price']
+
         ohlc = self.OHLC
         orders_placed = self.getOrders()
         order_book = self.order_book
@@ -155,29 +180,33 @@ class API():
     def cancelOrder(self, id):
         self.private.cancel_order(order_id=id)
 
-    def placeOrder(self, type, side, size, price, trigger=np.nan):
-        price = str(round(math.floor(price * 100) * 0.01, 2))
-        size = str(round(math.floor(size * 100000000) * 0.00000001,8))
-        if type == "stop":
-            if side == "sell": stop = "loss"
-            if side == "buy":  stop = "entry"
+    def placeOrder(self, **kwargs):
+        price = str(round(kwargs['price'], self.precision))
+        size = str(round(math.floor(kwargs['size'] * 100000000) * 0.00000001,8))
+        if kwargs['type'] == "stop":
+            if kwargs['side'] == "sell": stop = "loss"
+            if kwargs['side'] == "buy":  stop = "entry"
                 
             payload = { "product_id": self.symbol, "size": size, "stop": stop }
-            if math.isnan(trigger) == True:
-                payload["type"] = "market"
-                payload["stop_price"] = price
-            else:
-                trigger = str(round(math.floor(trigger * 100) * 0.01, 2))
+            if 'trigger' in kwargs:
+                trigger = str(round(kwargs['price'], 7)) #str(round(kwargs['trigger'], 6))
                 payload["type"] = "limit"
                 payload["price"] = price
                 payload["stop_price"] = trigger
+            else:
+                payload["type"] = "market"
+                payload["stop_price"] = price
         
-        elif type == "limit":
-            payload = { "product_id": self.symbol, "size": size, "price": price, "type": "limit", "stp": "co", "post_only": True }
-        elif type == "market":
+        elif kwargs['type'] == "limit":
+            if 'post_only' in kwargs: 
+                post_only = kwargs['post_only']
+            else:
+                post_only = False
+            payload = { "product_id": self.symbol, "size": size, "price": price, "type": "limit", "stp": "co", "post_only": post_only }
+        elif kwargs['type'] == "market":
             payload = { "product_id": self.symbol, "size": size, "type": "market" }
 
-        if side == "buy":
+        if kwargs['side'] == "buy":
             return self.private.buy(**payload) 
         else:
             return self.private.sell(**payload)
@@ -186,6 +215,7 @@ class API():
     def end(self):
         self.tickerWS.close()
         self.ordersPlacedWS.close()
+        # self.ws.close()
         self.kill = True
 
 

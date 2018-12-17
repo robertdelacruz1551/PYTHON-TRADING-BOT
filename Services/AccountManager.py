@@ -4,68 +4,78 @@ import math
 import datetime
 
 class AccountManager():
-    def __init__(self, fund, risk, ordersColumns, fee=0.003, printBalance=False, reinvest=True):
-        self.name         = None
-        self.fund         = fund
-        self.risk         = risk
-        self.fee          = fee
-        self.columns      = ordersColumns
-        self.orders       = pd.DataFrame(data=[], columns=(self.columns))
-        self.recorded     = []
-        self.bookedOrdersByAlgo = []
-        self.reinvest     = reinvest
-
-        self.minOrderSize = 0.1
-        self.riskAmount   = self.fund * self.risk
-
-        self.fundsHold    = 0
-        self.funds        = self.fund
-        self.sharesHold   = 0
-        self.shares       = 0
-        self.profitAndLoss= 0
-
-        self.openOrders   = pd.DataFrame(data=[], columns=(self.columns))
-        self.printBalance = printBalance
-        self.accountBalanceMessage   = None
-
-    def lossCalc(self, purchased_at, size):
-        invested = purchased_at * size
-        fee = invested * self.fee
-        risk = invested * self.risk
-        stop = round(((fee + invested) - risk) / size, 2)
-        return np.max([stop, 0.01])
-
-    def size(self, buy):
-        return round((self.funds / buy),8)
-
-
-    def balance(self, orders):
-        self.orders = orders[ ( ( orders['order_id'].isin(self.bookedOrdersByAlgo) ) | 
-                                ( orders['maker_order_id'].isin(self.bookedOrdersByAlgo) ) | 
-                                ( orders['taker_order_id'].isin(self.bookedOrdersByAlgo) ) ) ]
-        # set account variables
-        self.openOrders     = self.orders[ ( self.orders['type']!='filled' ) & ( self.orders['type']!='canceled' ) ]
-        self.closedOrders   = self.orders[ ( self.orders['type']=='filled' ) | ( self.orders['type']=='canceled' ) ]
-        self.openBuyOrders  = self.openOrders[self.openOrders['side'] == 'buy' ]
-        self.openSellOrders = self.openOrders[self.openOrders['side'] == 'sell']
-        self.openStopLoss   = self.openOrders[self.openOrders['order_type'] == 'loss']
-        self.openStopEntry  = self.openOrders[self.openOrders['order_type'] == 'entry']
+    def __init__(self, orders, products, product_info, orders_placed_during_session=[], risk=None, myholdings=None):
+        self.product_info = product_info
+        if type(products) != list:
+            products = [ products ]
+        self.currencies = list(set([pair.upper() for pair in '-'.join(products).split('-')]))
+        holdings = myholdings if myholdings else { currency: float(input("Current {} holding? ".format(currency))) for currency in self.currencies}
+        self.holdings = pd.DataFrame([holdings], columns=list(holdings.keys()))
+        self.risk = (risk if risk else (float(input("Risk % of account? ")) * 0.01)) + 1
+        self.ORDERS = orders
+        self.orders = None
+        self.balance = pd.DataFrame([], columns=['starting_balance','transactions','on_hold'])
+        self.orders_placed_during_session = orders_placed_during_session
+        self.update()
         
-        # self.fundsHold      = np.max([ 0.0, round((self.openBuyOrders['price'] * self.openBuyOrders['remaining_size']).sum(),2)])
-        self.fundsHold      = (self.openBuyOrders['price'] * self.openBuyOrders['remaining_size']).sum()
-        self.funds         = np.max([ 0.0, round((self.fund + self.orders['funds'].sum() - self.fundsHold),2) ] )
-        self.sharesHold     = np.max([ 0.0, (self.openSellOrders['remaining_size'].sum()) ] )
-        self.shares         = np.max([ 0.0, (self.orders['shares'].sum() - self.sharesHold) ])
+    def add_funds(self, currency, funds):
+        currency = currency.upper()
+        self.holdings.loc[0, currency ] += funds
+        
+    def remove_funds(self, currency, funds):
+        self.holdings.loc[0, currency.upper()] -= funds
+        
+    def orders_placed(self):
+        return self.orders.drop_duplicates(subset=['order_id'],keep='first')
+    
+    def find_order_by_id(self, id):
+        return self.orders[ self.orders['order_id'] == id ].drop_duplicates(subset=['order_id'], keep='first')
+    
+    def update(self):
+        self.orders   = self.ORDERS[ self.ORDERS['order_id'].isin(self.orders_placed_during_session) ]
+        self.balance  = pd.DataFrame(self.holdings.sum().reset_index()).merge(
+                            pd.DataFrame(self.orders[self.currencies].sum().reset_index()), 
+                            how='left',
+                            left_on='index',
+                            right_on='index'
+                        ).merge(
+                            pd.DataFrame(self.orders[self.orders['order_type']=='limit'][['currency_on_hold','on_hold']].groupby(['currency_on_hold'])['on_hold'].sum()).reset_index(),
+                            how='left',
+                            left_on = 'index',
+                            right_on = 'currency_on_hold'
+                        ).merge(
+                            pd.DataFrame(self.orders[self.orders['order_type']!='limit'][['currency_on_hold','on_hold']].groupby(['currency_on_hold'])['on_hold'].sum()).reset_index(),
+                            how='left',
+                            left_on = 'index',
+                            right_on = 'currency_on_hold'
+                        ).fillna(0).drop(['currency_on_hold_x','currency_on_hold_y'], axis=1)
+        
+        self.balance.columns=['currency','starting_balance','transactions','on_book','on_stop']
+        self.balance['available'] = self.balance['starting_balance'] + self.balance['transactions'] - (self.balance['on_book'] + self.balance['on_stop'])
+        self.balance.set_index('currency',inplace=True)
 
-        # prints the account balance every time there's an update to the orders
-        if int(self.funds):
-            self.profitAndLoss = round(self.funds - self.fund,4)
+    def pair_split(self, product):
+        return product.upper().split('-')
 
-        if not self.reinvest:
-           self.funds = np.min([ self.funds, self.fund ])
+    def min_size(self, product):
+        return self.product_info.loc[product.upper()]['base_min_size']
 
-        accountBalanceMessage = "P&L: {}, Funds available: {}, Funds on hold: {}, Shares available: {}, Shares on hold: {}".format(self.profitAndLoss, self.funds, self.fundsHold, self.shares, self.sharesHold)
-        if self.accountBalanceMessage != accountBalanceMessage:
-            if self.printBalance:
-                print("{}: {} | {}".format(datetime.datetime.now(), self.name, accountBalanceMessage))
-            self.accountBalanceMessage = accountBalanceMessage
+    def can_buy(self, product, price):
+        base = self.pair_split(product)[1]
+        size = self.balance.loc[base]['available'] / price
+        return size if size >= self.min_size(product) else 0
+
+    def can_sell(self, product, on=['available','on_stop'], percent=1):
+        pair = self.pair_split(product)[0]
+        size = self.balance.loc[pair][on].sum() * percent
+        return size if size >= self.min_size(product) else 0
+
+    def stop(self, purchase_at, risk=None):
+        risk = risk if risk else self.risk
+        return purchase_at / risk
+
+    def pending_orders(self, side='buy,sell', order_type='limit,market,loss,entry', greater_than=0, lower_than=999999):
+        return self.orders[ (self.orders['price']>greater_than)&(self.orders['price']<lower_than)&(self.orders['order_type'].isin(order_type.replace(' ','').lower().split(',')))&(self.orders['side'].isin(side.replace(' ','').lower().split(',')))&~(self.orders['status'].isin(['filled','canceled'])) ]
+
+    def filled_orders(self, side='buy,sell', order_type='limit,market,loss,entry', greater_than=0, lower_than=999999):
+        return self.orders[ (self.orders['price']>greater_than)&(self.orders['price']<lower_than)&(self.orders['order_type'].isin(order_type.replace(' ','').lower().split(',')))&(self.orders['side'].isin(side.replace(' ','').lower().split(',')))&(self.orders['status'].isin(['filled'])) ]

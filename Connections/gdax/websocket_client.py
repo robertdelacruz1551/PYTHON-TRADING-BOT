@@ -88,8 +88,8 @@ class WebsocketClient(object):
             signature = hmac.new(hmac_key, message, hashlib.sha256)
             signature_b64 = base64.b64encode(signature.digest()).decode('utf-8').rstrip('\n')
             self.sub_params['signature'] = signature_b64
-            self.sub_params['key'] = self.api_key
-            self.sub_params['passphrase'] = self.api_passphrase
+            self.sub_params['key']       = self.api_key
+            self.sub_params['passphrase']= self.api_passphrase
             self.sub_params['timestamp'] = timestamp
 
     def _connect(self):
@@ -217,7 +217,7 @@ class WebsocketClient(object):
         if self.should_print or self.msgPrintDueToError:
             if self.msgPrintDueToError:
                 self.msgCount += 1
-            if self.msgCount > 5:
+            if self.msgCount > 1:
                 self.msgPrintDueToError = False
                 self.msgCount = 0
             print(msg)

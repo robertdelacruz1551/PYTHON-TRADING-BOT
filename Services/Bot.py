@@ -1,8 +1,9 @@
-import time
+import time, json, datetime
 import pandas as pd
-import datetime
-from threading import Thread   
-import json
+import numpy as np
+from threading import Thread
+#from multiprocessing import Pool
+from multiprocessing.dummy import Pool as ThreadPool
 
 class Bot():
     def __init__(self, api, strategy = None, strategies=[], sec_update=1):
@@ -29,7 +30,7 @@ class Bot():
             print("Terminating Bot")
             self.running = False
             self.api.end()
-            self.ROBOT.join()
+            self.ROBOT.join(timeout=10)
 
     def start(self):
         def process():
@@ -37,36 +38,36 @@ class Bot():
             print("Bot is running")
             while self.running: 
                 try:
-                    self.run()
+                    # pool = ThreadPool(np.min([3, len(self.strategies)]))
+                    # pool.map(self.run, self.strategies)
+                    # pool.close()
+                    # pool.join()
+                    for strategy in self.strategies:
+                        self.run(strategy)
                 except KeyboardInterrupt:
                     print("\n{}: Algorithm interupted manually".format(datetime.datetime.now()))
                     self.stop()
                 except Exception as e:
                     self.on_error(e)
             else:
-                print('Bot has stopped working')
+                print('Bot has stopped')
                 
         self.ROBOT = Thread(target=process)
         self.ROBOT.start()
         
-
-    def run(self):
-        # the strategy will run return a list of instructions based on the calculation. The first set of instruction are a 
-        # list of order cancelations. the second set of instructions are a list of orders to execute
+      
+    def run(self, strategy):
         time.sleep(self.sec_update)
+        # strategy will review the data and provide instructions
+        strategy.speculate()
 
-        # Run the strategies
-        for strategy in self.strategies:
-            # strategy will review the data and provide instructions
-            strategy.speculate()
+        # Cancel orders
+        for order in [order for order in strategy.cancel_orders if order is not None]:
+            self.api.cancel_order( order )
 
-            # Cancel orders
-            for order in strategy.cancel_orders:
-                self.api.cancel_order( order )
-            
-            time.sleep(0.2)
+        time.sleep(0.1)
 
-            # Place orders
-            for order in strategy.place_orders:
-                response = self.api.place_order( **order )
-                strategy.orders_placed_during_session.append(response["id"])
+        # Place orders
+        for order in [order for order in strategy.place_orders if order is not None]:
+            response = self.api.place_order( **order )
+            strategy.orders_placed_during_session.append(response["id"])
