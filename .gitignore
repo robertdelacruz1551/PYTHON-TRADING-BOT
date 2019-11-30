@@ -5,6 +5,11 @@ Credentials/
 *.pyc
 *.DS_Store
 *.ipynb
+*-checkpoint.py
 algorithm.py
 Services/Statements.py
 Backtest.py
+*.csv
+*.pdf
+*.png
+Services/Trend.py
